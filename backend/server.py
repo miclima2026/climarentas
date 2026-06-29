@@ -14,7 +14,6 @@ from datetime import datetime, timezone, timedelta
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
@@ -23,7 +22,7 @@ app = FastAPI(title="ClimaRentas API")
 api_router = APIRouter(prefix="/api")
 
 
-# ----- Models -----
+# ----- Rental Models -----
 ProductType = Literal["calenton", "cooler"]
 RentalStatus = Literal["pendiente", "en_progreso", "terminado", "atrasado"]
 
@@ -36,8 +35,8 @@ class RentalBase(BaseModel):
     product_type: ProductType
     product_model: str
     cost: float
-    start_date: str  # ISO datetime string
-    end_date: str    # ISO datetime string
+    start_date: str
+    end_date: str
     status: RentalStatus = "pendiente"
     notes: Optional[str] = ""
 
@@ -66,9 +65,32 @@ class RentalUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+# ----- Expense Models -----
+class ExpenseBase(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    description: str
+    amount: float
+    date: str  # ISO date string
+
+
+class Expense(ExpenseBase):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ExpenseCreate(ExpenseBase):
+    pass
+
+
+class ExpenseUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    description: Optional[str] = None
+    amount: Optional[float] = None
+    date: Optional[str] = None
+
+
 # ----- Helpers -----
 def compute_status(rental: dict) -> str:
-    """Auto-compute status based on current time vs dates, but respect 'terminado'."""
     if rental.get("status") == "terminado":
         return "terminado"
     now = datetime.now(timezone.utc)
@@ -94,7 +116,7 @@ def enrich(rental: dict) -> dict:
     return rental
 
 
-# ----- Routes -----
+# ----- Rental Routes -----
 @api_router.get("/")
 async def root():
     return {"message": "ClimaRentas API", "status": "ok"}
@@ -122,7 +144,6 @@ async def list_rentals(status: Optional[str] = None, q: Optional[str] = None):
 
 @api_router.get("/rentals/today", response_model=List[Rental])
 async def todays_rentals():
-    """Returns rentals with deliveries or returns happening today."""
     now = datetime.now(timezone.utc)
     today = now.date()
     docs = await db.rentals.find({}, {"_id": 0}).to_list(1000)
@@ -141,7 +162,6 @@ async def todays_rentals():
 
 @api_router.get("/rentals/upcoming", response_model=List[Rental])
 async def upcoming_rentals(days: int = 7):
-    """Returns rentals starting or ending in next N days."""
     now = datetime.now(timezone.utc)
     limit = now + timedelta(days=days)
     docs = await db.rentals.find({}, {"_id": 0}).to_list(1000)
@@ -154,7 +174,6 @@ async def upcoming_rentals(days: int = 7):
                 start = start.replace(tzinfo=timezone.utc)
             if end.tzinfo is None:
                 end = end.replace(tzinfo=timezone.utc)
-            # Upcoming = either start in window OR end in window OR active now
             if (now <= start <= limit) or (now <= end <= limit) or (start <= now <= end):
                 out.append(enrich(d))
         except Exception:
@@ -165,32 +184,41 @@ async def upcoming_rentals(days: int = 7):
 
 @api_router.get("/stats")
 async def get_stats():
-    docs = await db.rentals.find({}, {"_id": 0}).to_list(2000)
-    docs = [enrich(d) for d in docs]
     now = datetime.now(timezone.utc)
     today = now.date()
+
+    # Rentals
+    rental_docs = await db.rentals.find({}, {"_id": 0}).to_list(2000)
+    rental_docs = [enrich(d) for d in rental_docs]
     by_status = {"pendiente": 0, "en_progreso": 0, "terminado": 0, "atrasado": 0}
-    today_deliveries = 0
-    today_returns = 0
+    monthly_deliveries = 0
     monthly_revenue = 0.0
-    for d in docs:
+    for d in rental_docs:
         by_status[d["status"]] = by_status.get(d["status"], 0) + 1
         try:
-            start = datetime.fromisoformat(d["start_date"].replace("Z", "+00:00")).date()
-            end = datetime.fromisoformat(d["end_date"].replace("Z", "+00:00")).date()
-            if start == today:
-                today_deliveries += 1
-            if end == today:
-                today_returns += 1
+            start = datetime.fromisoformat(d["start_date"].replace("Z", "+00:00"))
             if start.year == now.year and start.month == now.month:
+                monthly_deliveries += 1
                 monthly_revenue += float(d.get("cost", 0))
         except Exception:
             continue
+
+    # Expenses this month
+    expense_docs = await db.expenses.find({}, {"_id": 0}).to_list(2000)
+    monthly_expenses = 0.0
+    for e in expense_docs:
+        try:
+            d = datetime.fromisoformat(e["date"].replace("Z", "+00:00")) if "T" in e["date"] else datetime.strptime(e["date"][:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if d.year == now.year and d.month == now.month:
+                monthly_expenses += float(e.get("amount", 0))
+        except Exception:
+            continue
+
     return {
-        "total": len(docs),
+        "total": len(rental_docs),
         "by_status": by_status,
-        "today_deliveries": today_deliveries,
-        "today_returns": today_returns,
+        "monthly_deliveries": monthly_deliveries,
+        "monthly_expenses": round(monthly_expenses, 2),
         "monthly_revenue": round(monthly_revenue, 2),
     }
 
@@ -221,6 +249,30 @@ async def delete_rental(rental_id: str):
     result = await db.rentals.delete_one({"id": rental_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Renta no encontrada")
+    return {"ok": True}
+
+
+# ----- Expense Routes -----
+@api_router.post("/expenses", response_model=Expense)
+async def create_expense(payload: ExpenseCreate):
+    expense = Expense(**payload.model_dump())
+    doc = expense.model_dump()
+    await db.expenses.insert_one(doc)
+    doc.pop("_id", None)
+    return Expense(**doc)
+
+
+@api_router.get("/expenses", response_model=List[Expense])
+async def list_expenses():
+    docs = await db.expenses.find({}, {"_id": 0}).sort("date", -1).to_list(1000)
+    return [Expense(**d) for d in docs]
+
+
+@api_router.delete("/expenses/{expense_id}")
+async def delete_expense(expense_id: str):
+    result = await db.expenses.delete_one({"id": expense_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Gasto no encontrado")
     return {"ok": True}
 
 

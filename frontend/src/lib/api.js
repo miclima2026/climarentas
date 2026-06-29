@@ -18,3 +18,9 @@ export const rentalsApi = {
   remove: (id) => api.delete(`/rentals/${id}`).then((r) => r.data),
   stats: () => api.get("/stats").then((r) => r.data),
 };
+
+export const expensesApi = {
+  list: () => api.get("/expenses").then((r) => r.data),
+  create: (data) => api.post("/expenses", data).then((r) => r.data),
+  remove: (id) => api.delete(`/expenses/${id}`).then((r) => r.data),
+};

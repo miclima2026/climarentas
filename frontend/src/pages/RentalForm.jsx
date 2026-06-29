@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { rentalsApi } from "../lib/api";
-import { Flame, Snowflake, ArrowLeft } from "lucide-react";
+import { Flame, Snowflake, ArrowLeft, MapPin } from "lucide-react";
 import { toast } from "sonner";
 
 const FIELD =
@@ -14,17 +14,26 @@ const defaultDate = () => {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 };
 
-const addHours = (h) => {
-  const d = new Date();
-  d.setMinutes(0, 0, 0);
-  d.setHours(d.getHours() + h);
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-};
-
 const toLocalInput = (iso) => {
   if (!iso) return "";
   const d = new Date(iso);
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+
+const calcEndDate = (startIso, hours, minutes) => {
+  const start = new Date(startIso);
+  const totalMinutes = (parseInt(hours) || 0) * 60 + (minutes ? 30 : 0);
+  if (totalMinutes <= 0) return new Date(start.getTime() + 60 * 60000).toISOString();
+  return new Date(start.getTime() + totalMinutes * 60000).toISOString();
+};
+
+const openGoogleMaps = (address) => {
+  if (!address.trim()) {
+    toast.error("Escribe una dirección primero");
+    return;
+  }
+  const query = encodeURIComponent(address);
+  window.open(`https://www.google.com/maps/search/?api=1&query=${query}`, "_blank");
 };
 
 export default function RentalForm() {
@@ -40,23 +49,31 @@ export default function RentalForm() {
     product_model: "",
     cost: "",
     start_date: defaultDate(),
-    end_date: addHours(24),
     status: "pendiente",
     notes: "",
   });
+  const [hours, setHours] = useState("1");
+  const [halfHour, setHalfHour] = useState(false);
 
   useEffect(() => {
     if (!editing) return;
     rentalsApi
       .get(id)
-      .then((r) =>
+      .then((r) => {
         setForm({
           ...r,
           start_date: toLocalInput(r.start_date),
-          end_date: toLocalInput(r.end_date),
           cost: r.cost,
-        }),
-      )
+        });
+        // Intentar calcular duración desde start y end
+        if (r.start_date && r.end_date) {
+          const diff = (new Date(r.end_date) - new Date(r.start_date)) / 60000;
+          const h = Math.floor(diff / 60);
+          const m = diff % 60;
+          setHours(String(h));
+          setHalfHour(m >= 30);
+        }
+      })
       .catch(() => {
         toast.error("Renta no encontrada");
         navigate("/rentas");
@@ -71,14 +88,15 @@ export default function RentalForm() {
     if (!form.location.trim()) return toast.error("Falta la ubicación");
     if (!form.product_model.trim()) return toast.error("Falta el modelo");
     if (!form.cost || Number(form.cost) <= 0) return toast.error("Costo inválido");
-    if (new Date(form.end_date) <= new Date(form.start_date))
-      return toast.error("La devolución debe ser después de la entrega");
+    if (!hours || (parseInt(hours) === 0 && !halfHour)) return toast.error("Ingresa la duración de la renta");
+
+    const end_date = calcEndDate(form.start_date, hours, halfHour);
 
     const payload = {
       ...form,
       cost: Number(form.cost),
       start_date: new Date(form.start_date).toISOString(),
-      end_date: new Date(form.end_date).toISOString(),
+      end_date,
     };
 
     try {
@@ -91,8 +109,8 @@ export default function RentalForm() {
         toast.success("Renta registrada");
       }
       navigate("/rentas");
-    } catch {
-      toast.error("Error al guardar");
+    } catch (err) {
+      const msg = err?.response?.data?.detail || JSON.stringify(err?.response?.data) || err.message || "Error al guardar"; toast.error(msg);
     } finally {
       setSaving(false);
     }
@@ -118,6 +136,7 @@ export default function RentalForm() {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5 bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-sm">
+
         {/* Product type toggle */}
         <div>
           <label className={LABEL}>Tipo de producto</label>
@@ -161,6 +180,7 @@ export default function RentalForm() {
           </div>
         </div>
 
+        {/* Cliente y teléfono */}
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <label className={LABEL}>Nombre del cliente *</label>
@@ -186,18 +206,31 @@ export default function RentalForm() {
           </div>
         </div>
 
+        {/* Ubicación con botón Google Maps */}
         <div>
           <label className={LABEL}>Ubicación / dirección *</label>
-          <input
-            data-testid="input-location"
-            type="text"
-            value={form.location}
-            onChange={(e) => update("location", e.target.value)}
-            placeholder="Calle, número, colonia, ciudad"
-            className={FIELD}
-          />
+          <div className="flex gap-2">
+            <input
+              data-testid="input-location"
+              type="text"
+              value={form.location}
+              onChange={(e) => update("location", e.target.value)}
+              placeholder="Calle, número, colonia, ciudad"
+              className={FIELD}
+            />
+            <button
+              type="button"
+              onClick={() => openGoogleMaps(form.location)}
+              className="shrink-0 w-12 h-12 mt-0.5 rounded-xl bg-green-500 hover:bg-green-600 text-white grid place-items-center transition-colors shadow-sm"
+              title="Abrir en Google Maps"
+            >
+              <MapPin className="w-5 h-5" />
+            </button>
+          </div>
+          <p className="text-xs text-slate-400 mt-1.5">Presiona el pin 📍 para ver la ubicación en Google Maps.</p>
         </div>
 
+        {/* Modelo y costo */}
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <label className={LABEL}>Modelo *</label>
@@ -225,29 +258,53 @@ export default function RentalForm() {
           </div>
         </div>
 
-        <div className="grid sm:grid-cols-2 gap-4">
-          <div>
-            <label className={LABEL}>Fecha y hora de entrega *</label>
-            <input
-              data-testid="input-start-date"
-              type="datetime-local"
-              value={form.start_date}
-              onChange={(e) => update("start_date", e.target.value)}
-              className={FIELD}
-            />
-          </div>
-          <div>
-            <label className={LABEL}>Fecha y hora de devolución *</label>
-            <input
-              data-testid="input-end-date"
-              type="datetime-local"
-              value={form.end_date}
-              onChange={(e) => update("end_date", e.target.value)}
-              className={FIELD}
-            />
-          </div>
+        {/* Fecha de entrega */}
+        <div>
+          <label className={LABEL}>Fecha y hora de entrega *</label>
+          <input
+            data-testid="input-start-date"
+            type="datetime-local"
+            value={form.start_date}
+            onChange={(e) => update("start_date", e.target.value)}
+            className={FIELD}
+          />
         </div>
 
+        {/* Duración */}
+        <div>
+          <label className={LABEL}>Duración de la renta *</label>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 flex-1">
+              <input
+                data-testid="input-hours"
+                type="number"
+                min="0"
+                max="72"
+                value={hours}
+                onChange={(e) => setHours(e.target.value)}
+                placeholder="0"
+                className="w-24 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5 text-base focus:ring-2 focus:ring-indigo-500 outline-none text-center font-bold"
+              />
+              <span className="text-sm font-semibold text-slate-600">horas</span>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <div
+                onClick={() => setHalfHour(!halfHour)}
+                className={`w-12 h-6 rounded-full transition-colors relative ${halfHour ? "bg-indigo-600" : "bg-slate-200"}`}
+              >
+                <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${halfHour ? "translate-x-7" : "translate-x-1"}`} />
+              </div>
+              <span className="text-sm font-semibold text-slate-700">+ 30 min</span>
+            </label>
+          </div>
+          {(parseInt(hours) > 0 || halfHour) && (
+            <p className="text-xs text-indigo-600 font-semibold mt-1.5">
+              Duración: {parseInt(hours) || 0}h {halfHour ? "30min" : ""}
+            </p>
+          )}
+        </div>
+
+        {/* Estado (solo edición) */}
         {editing && (
           <div>
             <label className={LABEL}>Estado</label>
@@ -268,6 +325,7 @@ export default function RentalForm() {
           </div>
         )}
 
+        {/* Notas */}
         <div>
           <label className={LABEL}>Notas</label>
           <textarea

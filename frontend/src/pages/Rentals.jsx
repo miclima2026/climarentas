@@ -34,7 +34,7 @@ export default function Rentals() {
   }, []);
 
   const handleDelete = async (rental) => {
-    if (!confirm(`¿Eliminar la renta de ${rental.client_name}?`)) return;
+    if (!window.confirm(`¿Eliminar la renta de ${rental.client_name}?`)) return;
     try {
       await rentalsApi.remove(rental.id);
       toast.success("Renta eliminada");
